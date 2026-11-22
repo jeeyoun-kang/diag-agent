@@ -1,35 +1,25 @@
 import psutil
 
-from .base import SystemCollector
+from .base import PsutilCollector
 
 
-class WindowsCollector(SystemCollector):
-    def get_cpu_percent(self) -> float:
-        return psutil.cpu_percent(interval=1)
-
-    def get_memory_detail(self) -> dict:
-        vm = psutil.virtual_memory()
-        return {
-            "total_gb": round(vm.total / (1024**3), 2),
-            "used_gb": round(vm.used / (1024**3), 2),
-            "percent": vm.percent,
-        }
-
-    def get_top_processes(self, n: int = 5) -> list[dict]:
-        procs = []
-        for p in psutil.process_iter(["pid", "name", "cpu_percent", "memory_percent"]):
-            procs.append(p.info)
-        procs.sort(key=lambda p: p["cpu_percent"] or 0, reverse=True)
-        return procs[:n]
-
-    def get_disk_usage(self) -> dict:
-        usage = psutil.disk_usage("C:\\")
-        return {
-            "total_gb": round(usage.total / (1024**3), 2),
-            "used_gb": round(usage.used / (1024**3), 2),
-            "percent": usage.percent,
-        }
+class WindowsCollector(PsutilCollector):
+    DISK_PATH = "C:\\"
 
     def read_recent_logs(self, n: int = 50) -> list[str]:
-        # Phase 1 뼈대: Windows 이벤트로그 연동은 후속 단계에서 pywin32로 구현
-        return []
+        # 이벤트로그 연동(pywin32)은 후속 단계. 빈 리스트를 반환하면 에이전트가
+        # "로그상 이상 없음"으로 오인하므로, 미지원임을 에러로 알린다.
+        raise NotImplementedError("Windows 이벤트로그 조회는 아직 지원되지 않음 (로그 근거로 판단하지 말 것)")
+
+    def check_service_status(self, service_name: str) -> dict:
+        try:
+            info = psutil.win_service_get(service_name).as_dict()
+        except psutil.NoSuchProcess:
+            return {"service": service_name, "status": "not_found"}
+        return {
+            "service": service_name,
+            "status": info["status"],
+            "start_type": info["start_type"],
+            "pid": info["pid"],
+            "display_name": info["display_name"],
+        }

@@ -12,9 +12,37 @@ Linux(메인)/Windows(서브) 시스템이 느려지면 AI 에이전트가 도�
 [진단 에이전트 - 공통 로직]
         ↓ (도구 인터페이스 동일)
 [플랫폼 어댑터]
-  ├─ LinuxCollector   ← 메인: top·df·free·systemctl·journalctl·ss
-  └─ WindowsCollector ← 서브: psutil·이벤트로그·tasklist
+  └─ PsutilCollector  ← 공통: CPU·메모리·프로세스·디스크·디스크 I/O·네트워크 (psutil)
+       ├─ LinuxCollector   ← 메인: systemctl·journalctl
+       └─ WindowsCollector ← 서브: Windows 서비스 (이벤트로그는 미지원)
 ```
+
+### 에이전트 도구
+
+| 도구 | 내용 |
+|---|---|
+| `get_cpu_percent` | 시스템 전체 CPU 사용률 |
+| `get_memory_detail` | 메모리 총량/사용량/사용률 |
+| `get_top_processes` | CPU 또는 메모리(`sort_by`) 기준 상위 프로세스 |
+| `get_disk_usage` | 디스크 용량 |
+| `get_disk_io` | 1초간 읽기/쓰기 MB/s, IOPS (Linux는 busy %) |
+| `get_network_summary` | 연결 상태 분포, 연결이 몰린 IP·포트·프로세스, 인터페이스 오류 |
+| `check_service_status` | 서비스 상태 (Linux는 재시작 횟수 포함) |
+| `read_recent_logs` | 최근 시스템 로그 (Linux만, Windows는 미지원 에러 반환) |
+
+### 진단 출력
+
+에이전트는 도구를 자유롭게 호출한 뒤, 최종 답변을 structured outputs(`output_config.format`)로 고정된 JSON으로 낸다.
+
+```json
+{
+  "summary": "...", "root_cause": "...", "evidence": ["..."],
+  "confidence": "low | medium | high",
+  "action": { "description": "...", "risk_level": "low | medium | high" }
+}
+```
+
+조치는 **제안만** 한다 (`action_proposed`에 저장). 실행 경로는 없다.
 
 ## 아키텍처
 
@@ -56,21 +84,24 @@ diag-agent/
 ├── data/                        SQLite DB 저장 위치
 ├── src/
 │   ├── config.py                환경변수·임계값·DB경로·OS 판별
-│   ├── main.py                  모니터링 루프 (임계값 초과 → 인시던트 기록)
+│   ├── main.py                  모니터링 루프 (임계값 초과 → 인시던트 → 진단 → 저장, 정상 복귀 시 resolve)
 │   ├── collectors/
-│   │   ├── base.py              공통 인터페이스 (SystemCollector)
-│   │   ├── linux_collector.py   psutil + systemctl/journalctl
-│   │   └── windows_collector.py psutil 기반
+│   │   ├── base.py              SystemCollector 인터페이스 + PsutilCollector 공통 구현
+│   │   ├── linux_collector.py   systemctl/journalctl
+│   │   └── windows_collector.py Windows 서비스
 │   ├── storage/
 │   │   ├── schema.sql           incidents 테이블
 │   │   └── db.py
 │   ├── agent/
 │   │   ├── tools.py             Claude tool 정의 + dispatcher
-│   │   └── agent_loop.py        멀티스텝 진단 루프 (tool_use 반복)
+│   │   └── agent_loop.py        멀티스텝 진단 루프 (tool_use 반복, 구조화 출력, 토큰 사용량 집계)
 │   └── bot/
 │       └── telegram_bot.py      텔레그램 봇 (핑퐁/승인 게이팅)
 └── tests/
-    └── test_collectors.py
+    ├── test_collectors.py       실제 수집값 + systemctl 출력 파싱
+    ├── test_tools.py            도구 정의 ↔ dispatcher 일치
+    ├── test_agent.py            가짜 Claude 클라이언트로 루프 검증
+    └── test_monitor.py          임시 DB로 인시던트 수명주기 검증
 ```
 
 ## 시작하기
@@ -98,7 +129,9 @@ cp .env.example .env
 ## 로드맵
 
 - [x] **Phase 1 — 모니터링 뼈대**: psutil 수집, 임계값 감지, SQLite 인시던트 스키마
-- [ ] **Phase 2 — 진단 에이전트** ★핵심: Function Calling 루프로 AI 자율 진단
+- [x] **Phase 2 — 진단 에이전트** ★핵심: Function Calling 루프로 AI 자율 진단
+  - 실측 1회 (Windows, 메모리 91%): 도구 4회 호출, 29.5초, 약 $0.035 (claude-sonnet-5)
+  - 남은 것: Linux 실환경 검증, `main.py` 루프 전체 실측, 앱별 메모리 합계·스왑 정보 도구, 임계값 기준 재설계
 - [ ] **Phase 3 — 텔레그램 + 정확도 추적** ★정량화: 승인 게이팅, 사후 검증 루프
 - [ ] **Phase 3.5 — 평가 계층** ★★진짜 차별점: 3계층 평가(최종답변·궤적·컴포넌트), 트레이싱, 골든 데이터셋
 - [ ] **Phase 4 — 고도화 + 대시보드**: RAG-lite 재발 탐지, LLM-as-a-Judge, Streamlit 대시보드
